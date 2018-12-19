@@ -24,6 +24,7 @@
 #include "variable.h"
 #include "error.h"
 #include "force.h"
+#include "random_mars.h"
 
 using namespace LAMMPS_NS;
 using namespace FixConst;
@@ -33,19 +34,10 @@ enum{NONE=0,EDGE,CONSTANT,VARIABLE};
 
 /* ---------------------------------------------------------------------- */
 
-namespace {
-  double const dbcR=8.315; // J/(mol*K)
-  double const dbcpi=3.1415926;
-  double const dbckb=1.3807E-23; // J/K
-  double const dbcM=39.96; // g/mol  ////////////////////////////////May be changed-1/6////////////////////////////
-  double const dbcNa=6.02E23;
-  double const dbcm=dbcM/dbcNa/1000; //kg
-}
-
 FixWallDiffusive::FixWallDiffusive(LAMMPS *lmp, int narg, char **arg) :
   Fix(lmp, narg, arg),
   nwall(0),
-  tempK(-1), TMAC(1.0)
+  wall_temp(-1), TMAC(1.0), prng(NULL)
 {
   if (narg < 4) error->all(FLERR,"Illegal fix wall/diffusive command");
 
@@ -55,7 +47,8 @@ FixWallDiffusive::FixWallDiffusive(LAMMPS *lmp, int narg, char **arg) :
 
   nwall = 0;
   int scaleflag = 1;
-
+  // PRNG seed, must be > 0
+  int seed = 0;
   int iarg = 3;
   while (iarg < narg) {
     if ((strcmp(arg[iarg],"xlo") == 0) || (strcmp(arg[iarg],"xhi") == 0) ||
@@ -103,10 +96,13 @@ FixWallDiffusive::FixWallDiffusive(LAMMPS *lmp, int narg, char **arg) :
       iarg += 2;
     } else if (strcmp(arg[iarg], "walltemp") == 0) {
       if (iarg+2 > narg) error->all(FLERR,"Illegal fix wall/diffusive command");
-      tempK = strtod(arg[iarg+1], NULL);
+      wall_temp = force->numeric(FLERR, arg[iarg+1]);
       iarg += 2;
     } else if (strcmp(arg[iarg], "TMAC") == 0) {
-      tmac = strtod(arg[iarg+1], NULL);
+      TMAC = force->numeric(FLERR, arg[iarg+1]);
+      iarg += 2;
+    } else if (strcmp(arg[iarg], "seed") == 0) {
+      seed = force->inumeric(FLERR, arg[iarg+1]);
       iarg += 2;
     } else error->all(FLERR,"Illegal fix wall/diffusive command");
   }
@@ -129,7 +125,7 @@ FixWallDiffusive::FixWallDiffusive(LAMMPS *lmp, int narg, char **arg) :
       error->all(FLERR,
                  "Cannot use fix wall/diffusive zlo/zhi for a 2d simulation");
 
-  if (tempK <= 0.0) {
+  if (wall_temp <= 0.0) {
     error->all(FLERR,
 	       "Must specify temperature > 0 K for fix wall/diffusive");
   }
@@ -137,243 +133,234 @@ FixWallDiffusive::FixWallDiffusive(LAMMPS *lmp, int narg, char **arg) :
   if (TMAC < 0.0 || TMAC > 1.0) {
     error->all(FLERR,
 	       "Tangential momentum accommodation coefficient must be in [0.0, 1.0] for fix wall/diffusive");
-    // scale factors for CONSTANT and VARIABLE walls
+  }
 
-    int flag = 0;
-    for (int m = 0; m < nwall; m++)
-      if (wallstyle[m] != EDGE) flag = 1;
+  if (seed <= 0) {
+    error->all(FLERR,
+	       "Pseudorandom number generator seed must be positive integer");
+  }
 
-    if (flag) {
-      if (scaleflag) {
-	xscale = domain->lattice->xlattice;
-	yscale = domain->lattice->ylattice;
-	zscale = domain->lattice->zlattice;
-      }
-      else xscale = yscale = zscale = 1.0;
+  prng = new RanMars(lmp, seed + comm->me);
 
-      for (int m = 0; m < nwall; m++) {
-	if (wallstyle[m] != CONSTANT) continue;
-	if (wallwhich[m] < YLO) coord0[m] *= xscale;
-	else if (wallwhich[m] < ZLO) coord0[m] *= yscale;
-	f      else coord0[m] *= zscale;
-      }
+  // scale factors for CONSTANT and VARIABLE walls
+
+  int flag = 0;
+  for (int m = 0; m < nwall; m++)
+    if (wallstyle[m] != EDGE) flag = 1;
+
+  if (flag) {
+    if (scaleflag) {
+      xscale = domain->lattice->xlattice;
+      yscale = domain->lattice->ylattice;
+      zscale = domain->lattice->zlattice;
     }
+    else xscale = yscale = zscale = 1.0;
 
-    // set varflag if any wall positions are variable
-
-    varflag = 0;
-    for (int m = 0; m < nwall; m++)
-      if (wallstyle[m] == VARIABLE) varflag = 1;
-  }
-
-  /* ---------------------------------------------------------------------- */
-
-  FixWallDiffusive::~FixWallDiffusive()
-  {
-    if (copymode) return;
-
-    for (int m = 0; m < nwall; m++)
-      if (wallstyle[m] == VARIABLE) delete [] varstr[m];
-  }
-
-  /* ---------------------------------------------------------------------- */
-
-  int FixWallDiffusive::setmask()
-  {
-    int mask = 0;
-    mask |= POST_INTEGRATE;
-    mask |= POST_INTEGRATE_RESPA;
-    return mask;
-  }
-
-  /* ---------------------------------------------------------------------- */
-
-  void FixWallDiffusive::init()
-  {
     for (int m = 0; m < nwall; m++) {
-      if (wallstyle[m] != VARIABLE) continue;
-      varindex[m] = input->variable->find(varstr[m]);
-      if (varindex[m] < 0)
-	error->all(FLERR,"Variable name for fix wall/diffusive does not exist");
-      if (!input->variable->equalstyle(varindex[m]))
-	error->all(FLERR,"Variable for fix wall/diffusive is invalid style");
+      if (wallstyle[m] != CONSTANT) continue;
+      if (wallwhich[m] < YLO) coord0[m] *= xscale;
+      else if (wallwhich[m] < ZLO) coord0[m] *= yscale;
+      else coord0[m] *= zscale;
     }
-
-    int nrigid = 0;
-    for (int i = 0; i < modify->nfix; i++)
-      if (modify->fix[i]->rigid_flag) nrigid++;
-
-    if (nrigid && comm->me == 0)
-      error->warning(FLERR,"Should not allow rigid bodies to bounce off "
-		     "relecting walls");
   }
 
-  /* ---------------------------------------------------------------------- */
+  // set varflag if any wall positions are variable
 
-  void FixWallDiffusive::post_integrate()
-  {
-    int i,dim,side;
-    double coord;
+  varflag = 0;
+  for (int m = 0; m < nwall; m++)
+    if (wallstyle[m] == VARIABLE) varflag = 1;
+}
 
+/* ---------------------------------------------------------------------- */
+
+FixWallDiffusive::~FixWallDiffusive()
+{
+  if (copymode) return;
+
+  for (int m = 0; m < nwall; m++)
+    if (wallstyle[m] == VARIABLE) delete [] varstr[m];
+}
+
+/* ---------------------------------------------------------------------- */
+
+int FixWallDiffusive::setmask()
+{
+  int mask = 0;
+  mask |= POST_INTEGRATE;
+  mask |= POST_INTEGRATE_RESPA;
+  return mask;
+}
+
+/* ---------------------------------------------------------------------- */
+
+void FixWallDiffusive::init()
+{
+  for (int m = 0; m < nwall; m++) {
+    if (wallstyle[m] != VARIABLE) continue;
+    varindex[m] = input->variable->find(varstr[m]);
+    if (varindex[m] < 0)
+      error->all(FLERR,"Variable name for fix wall/diffusive does not exist");
+    if (!input->variable->equalstyle(varindex[m]))
+      error->all(FLERR,"Variable for fix wall/diffusive is invalid style");
+  }
+
+  int nrigid = 0;
+  for (int i = 0; i < modify->nfix; i++)
+    if (modify->fix[i]->rigid_flag) nrigid++;
+
+  if (nrigid && comm->me == 0)
+    error->warning(FLERR,"Should not allow rigid bodies to bounce off "
+		   "diffusive walls");
+}
+
+namespace LAMMPS_NS {
+  struct DiffusiveWallImpl {
+    // Entry point 
+    void foreach_atom(int boxdim, int wallwhich_m, double coord) {
+      switch (boxdim) {
+      case 2:
+	foreach_atom_d<2>(wallwhich_m, coord);
+	break;
+      case 3:
+	foreach_atom_d<3>(wallwhich_m, coord);
+	break;
+      default:
+	error->all(FLERR, "Invalid dimensionality for fix wall/diffusive");
+      }
+    }
+
+    template<int boxdim>
+    void foreach_atom_d(int wallwhich_m, double coord) {
+      // Dispatch on the dim to the bounded set of boundary directions
+      // to the templated implementations to avoid any overhead
+      const int dim = wallwhich_m / 2;
+      const bool side = wallwhich_m % 2;
+      switch (dim) {
+      case 0:
+	foreach_atom_dw<boxdim, 0>(side, coord);
+	break;
+      case 1:
+	foreach_atom_dw<boxdim, 1>(side, coord);
+	break;
+      case 2:
+	foreach_atom_dw<boxdim, 2>(side, coord);
+	break;
+      default:
+	error->all(FLERR, "Invalid wall in fix wall/diffusive");
+      }
+    }
+    template<int boxdim, int dim>
+    void foreach_atom_dw(bool side, double coord) {
+      if (side)
+	foreach_impl<boxdim, dim, true>(coord);
+      else
+	foreach_impl<boxdim, dim, false>(coord);
+    }
+
+    // Loop over all local atoms and, if the mask says so, do the
+    // update
+    template <int boxdim, int dim, bool is_upper>
+    void foreach_impl(double coord) {
+      for (int i = 0; i < atom->nlocal; i++)
+	if (atom->mask[i] & diff->groupbit) {
+	  update<boxdim, dim, is_upper>(i, coord);
+	}
+    }
+    
+    template <int boxdim, int dim, bool is_upper>
+    void update(const int i, double coord) {
+      double** x = atom->x;
+      if ((is_upper && (x[i][dim] > coord))
+	  || (!is_upper && (x[i][dim] < coord) )) {
+	// Update position as for reflection
+	x[i][dim] = coord - (x[i][dim] - coord);
+	
+	// update velocity
+	if (diff->prng->uniform() <= diff->TMAC) {
+	  // Diffusive with prob(TMAC)
+	  diffusive_update<boxdim, dim, is_upper>(i);
+	} else {
+	  // Reflective with prob(1-TMAC)
+	  reflective_update<boxdim, dim, is_upper>(i);
+	}
+      }
+    }
+
+    template <int boxdim, int dim, bool is_upper>
+    void reflective_update(const int i) {
+      atom->v[i][dim] *= -1.0;
+    }
+        
+    template <int boxdim, int dim, bool is_upper>
+    void diffusive_update(const int i) {
+      const double wall_temp = diff->wall_temp;
+      // Standard deviation of the Gaussian distribution that we draw
+      // sigma^2 = kT/m
+      const double sigma2 = force->boltz * diff->wall_temp / (atom->mass[atom->type[i]] * force->mvv2e);
+      const double sigma = sqrt(sigma2);
+
+      for (int d = 0; d < boxdim; ++d) {
+	atom->v[i][d] = (d == dim) ?
+	  draw_perpendicular(sigma2) :
+	  draw_tangential(sigma);
+      }
+    }
+
+    double draw_perpendicular(double sigma2) {
+      // Inverse transform sampling - see Wikipedia!
+      // Need CDF (cumulative distrubution function)
+
+      // Our PDF is: P(v) = v *exp(-v^2/(2 sigma^2))/sigma^2
+      // Checked form with wolfram alpha:
+      // integrate v *exp(-v^2/(2 sigma^2))/sigma^2 dv from v=0 to infinity
+      // gives 1 as required
+
+      // CDF(v) = integrate P(v') dv' from v'=0 to v
+      //        = 1 - exp(-v^2 / (2 sigma^2))
+
+      // Now draw uniform deviates (u) in [0,1] and invert CDF(v) = u
+      // v = sqrt(-2 sigma^2 ln(1-u))
+      double u = diff->prng->uniform();
+      return sqrt(-2.0 * sigma2 * log(1.0 - u));
+    }
+    double draw_tangential(double sigma) {
+      // Gaussian distribution:
+      // P(x) = exp(-x^2 / (2 sigma^2) ) / sqrt(2 pi sigma^2)
+      return sigma * diff->prng->gaussian();
+    }
+
+    DiffusiveWallImpl(FixWallDiffusive* diff_, Atom* atom_, Error* error_, Force* force_)
+      :
+      diff(diff_), atom(atom_), error(error_), force(force_)
+    {
+    }
+    
+    FixWallDiffusive* diff;
+    Atom* atom;
+    Error* error;
+    Force* force;
+  };
+}
+
+
+void FixWallDiffusive::post_integrate()
+{
+  if (varflag) modify->clearstep_compute();
+
+  DiffusiveWallImpl updater(this, atom, error, force);
+  for (int m = 0; m < nwall; m++) {
     // coord = current position of wall
     // evaluate variable if necessary, wrap with clear/add
+    double coord;
+    if (wallstyle[m] == VARIABLE) {
+      coord = input->variable->compute_equal(varindex[m]);
+      if (wallwhich[m] < YLO) coord *= xscale;
+      else if (wallwhich[m] < ZLO) coord *= yscale;
+      else coord *= zscale;
+    } else coord = coord0[m];
 
-    double **x = atom->x;
-    double **v = atom->v;
-    int *mask = atom->mask;
-    int nlocal = atom->nlocal;
-   
-    double diff1=1.0;
-
-
-    if (varflag) modify->clearstep_compute();
-
-    for (int m = 0; m < nwall; m++) {
-      if (wallstyle[m] == VARIABLE) {
-	coord = input->variable->compute_equal(varindex[m]);
-	if (wallwhich[m] < YLO) coord *= xscale;
-	else if (wallwhich[m] < ZLO) coord *= yscale;
-	else coord *= zscale;
-      } else coord = coord0[m];
-
-      dim = wallwhich[m] / 2;
-      side = wallwhich[m] % 2;
-
-      for (i = 0; i < nlocal; i++)
-	if (mask[i] & groupbit) {
-	  if (side == 0) {
-	    if (x[i][dim] < coord) {
-	      x[i][dim] = coord + (coord - x[i][dim]);
-
-	      // **************************the wall at low edge in z direction*******************************
-	      double W  = (double)rand() / (RAND_MAX + 1.0);
-	      // *********************************************************
-	      if(W<=TMAC){	
-		double dbcvp;// most probable velocity
-		dbcvp=sqrt(2*dbcR*tempK/dbcM*1000);
-		double dbcvm; // m/s
-		//take care for *dbcvp	
-		double dbcvz;
-		double dbcvcut=3.0;/////////////////////////////////May be changed-3/6////////////////////////////
-		double dbcpa;	
-		double dbcpth;  // probablity threshold
-		double dbcfvmax;
-	
-		int setbz=0;
-		dbcvm=dbcvp*sqrt(2)/2; // the velcoty which gives the maximum value of the fv 
-		dbcfvmax =dbcm/dbckb/tempK*dbcvm*exp(-dbcm*dbcvm*dbcvm/2/dbckb/tempK)*dbcvp; 
-		while(setbz==0){
-
-		  dbcvz=(double)rand() / RAND_MAX *dbcvcut*dbcvp;
-		  dbcpa=(double)rand() / RAND_MAX*dbcfvmax;
-		  dbcpth=dbcm/dbckb/tempK*dbcvz*exp(-dbcm*dbcvz*dbcvz/2/dbckb/tempK)*dbcvp;
-
-		  if (dbcpa<=dbcpth){
-		    v[i][dim]=dbcvz/100000;  // take care of /100000 from SI units to REAL units
-		    setbz=1;		
-		  }
-		}
-		/* -----------------------------------vx----------------------------------- */    
-		
-		dbcvm=1/dbcvp/sqrt(dbcpi); 
-		// the velcoty which gives the maximum value of the fv ////////////////////////////////
-		dbcfvmax =dbcvm*exp(-dbcm*dbcvm*dbcvm/2/dbckb/tempK);
-		int setbx=0;
-		while(setbx==0){		
-		  dbcvz=dbcvcut*dbcvp*((double)rand()/RAND_MAX*2-1);
-		  dbcpa=(double)rand()/RAND_MAX*dbcfvmax;
-		  dbcpth=dbcvm*exp(-dbcm*dbcvz*dbcvz/2/dbckb/tempK);
-
-		  if (dbcpa<=dbcpth){
-		    v[i][0]=dbcvz/100000;  // take care of /100000 from SI units to REAL units
-		    setbx=1;		
-		  }
-		}
-		/* -----------------------------------vy----------------------------------- */		
-		int setby=0;
-		while(setby==0){   
-		  dbcvz=dbcvcut*dbcvp*((double)rand()/RAND_MAX*2-1);
-		  dbcpa=(double)rand()/RAND_MAX*dbcfvmax;
-		  dbcpth=dbcvm*exp(-dbcm*dbcvz*dbcvz/2/dbckb/tempK);
-
-		  if (dbcpa<=dbcpth){
-		    v[i][1]=dbcvz/100000;  // take care of /100000 from SI units to REAL units
-		    setby=1;		
-		  }
-		}
-
-	      }else{ // W > TMAC //Give a specular reflection ////////////////#############////////////////////
-
-		v[i][dim]=-v[i][dim];
-	      }
-	    }  //end   if (x[i][dim] < coord) 
-	  } else {  // end  if (side == 0) 
-	    if (x[i][dim] > coord) {
-	      x[i][dim] = coord - (x[i][dim] - coord);
-	      // **************************the wall at high edge in z direction*******************************
-	      double W  = (double)rand() / (RAND_MAX + 1.0);
-	      // ********************************************************* 
-	      if(W<=TMAC){
-		/* ---------------------------------vz------------------------------------- */
-		double dbcvp;// most probable velocity
-		dbcvp=sqrt(2*dbcR*tempK/dbcM*1000);
-		double dbcvm; // m/s
-
-		//take care for *dbcvp	
-		double dbcvz;
-		double dbcvcut=3.0; /////////////////////////////////May be changed-6/6////////////////////////////
-		double dbcpa;
-		double dbcpth;  // probablity threshold
-		double dbcfvmax;
-
-		dbcvm=dbcvp*sqrt(2)/2; // the velcoty which gives the maximum value of the fv 
-		dbcfvmax =dbcm/dbckb/tempK*dbcvm*exp(-dbcm*dbcvm*dbcvm/2/dbckb/tempK)*dbcvp; 
-		int setuz=0;
-		while(setuz==0){
-		  dbcvz=(double)rand() / RAND_MAX *dbcvcut*dbcvp;
-		  dbcpa=(double)rand() / RAND_MAX*dbcfvmax;
-		  dbcpth=dbcm/dbckb/tempK*dbcvz*exp(-dbcm*dbcvz*dbcvz/2/dbckb/tempK)*dbcvp;
-		  if (dbcpa<=dbcpth){
-		    v[i][dim]=-dbcvz/100000; // take care of /100000 from SI units to REAL units
-		    setuz=1;
-		  }
-		}
-		/* -----------------------------------vx----------------------------------- */    
-		dbcvm=1/dbcvp/sqrt(dbcpi); 
-		// the velcoty which gives the maximum value of the fv ////////////////////////////////
-		dbcfvmax =dbcvm*exp(-dbcm*dbcvm*dbcvm/2/dbckb/tempK);		
-
-		int setbx=0;
-		while(setbx==0){ 		
-		  dbcvz=dbcvcut*dbcvp*((double)rand()/RAND_MAX*2-1);
-		  dbcpa=(double)rand()/RAND_MAX*dbcfvmax;
-		  dbcpth=dbcvm*exp(-dbcm*dbcvz*dbcvz/2/dbckb/tempK);
-
-		  if (dbcpa<=dbcpth){
-		    v[i][0]=dbcvz/100000;  // take care of /100000 from SI units to REAL units
-		    setbx=1;		
-		  }
-		}
-		/* -----------------------------------vy----------------------------------- */
-		int setby=0;
-		while(setby==0){  
-		  dbcvz=dbcvcut*dbcvp*((double)rand()/RAND_MAX*2-1);
-		  dbcpa=(double)rand()/RAND_MAX*dbcfvmax;
-		  dbcpth=dbcvm*exp(-dbcm*dbcvz*dbcvz/2/dbckb/tempK);
-
-		  if (dbcpa<=dbcpth){
-		    v[i][1]=dbcvz/100000;  // take care of /100000 from SI units to REAL units
-		    setby=1;		
-		  }
-		}
-	      }else{   // W > TMAC //Give a specular reflection ////////////////#############////////////////////
-		v[i][dim]=-v[i][dim];
-	      }
-	      /* ---------------------------------------------------------------------- */ 
-	    } // end if(x[i][dim]>coord)
-	  } //} else {  // end  if (side == 0)  
-	}// end       if (mask[i] & groupbit) 
-    } //   end    if (mask[i] & groupbit) 
-    if (varflag) modify->addstep_compute(update->ntimestep + 1);
+    updater.foreach_atom(domain->dimension, wallwhich[m], coord);
   }
+  if (varflag) modify->addstep_compute(update->ntimestep + 1);
+}
 

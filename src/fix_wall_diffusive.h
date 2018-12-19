@@ -24,6 +24,8 @@ FixStyle(wall/diffusive,FixWallDiffusive)
 
 namespace LAMMPS_NS {
 
+struct DiffusiveWallImpl;
+  
 class FixWallDiffusive : public Fix {
  public:
   FixWallDiffusive(class LAMMPS *, int, char **);
@@ -40,8 +42,10 @@ class FixWallDiffusive : public Fix {
   int varindex[6];
   int varflag;
   double xscale,yscale,zscale;
-  double tempK;
-  double TMAC;
+  double wall_temp; // Make per wall
+  double TMAC; // Make per wall
+  class RanMars* prng;
+  friend struct DiffusiveWallImpl;
 };
 
 }
