@@ -16,22 +16,22 @@ ID, group-ID are documented in "fix"_fix.html command :ulb,l
 wall/diffusive = style name of this fix command :l
 one or more face/arg pairs may be appended, exactly as for the "fix
 wall/reflect"_fix_wall_reflect.html command :l
-zero or more keyword/value pairs may be appended :l
+some keyword/value pairs may be appended, some are optional :l
 keyword = {walltemp} :l
-  {walltemp} value = number like 273.15 (temperature units)
-  {TMAC} value = number (Tangential momentum accommodation coefficient, dimensionless probability)
-  {seed} value = integer >= 1 to seed pseudorandom number generation
+  REQUIRED: {walltemp} value = number like 273.15 (temperature units)
+  REQUIRED: {TMAC} value = number (Tangential momentum accommodation coefficient, dimensionless probability)
+  REQUIRED: {seed} value = integer >= 1 to seed pseudorandom number generation
 keyword = {units} :l
-  {units} value = {lattice} or {box}
+  OPTIONAL: {units} value = {lattice} or {box}
     {lattice} = the wall position is defined in lattice units
     {box} = the wall position is defined in simulation box units :pre
 :ule
 
 [Examples:]
 
-fix xwalls all wall/reflect xlo EDGE xhi EDGE
-fix walls all wall/reflect xlo 0.0 ylo 10.0 units box
-fix top all wall/reflect zhi v_pressdown :pre
+fix xwalls all wall/diffusive xlo EDGE xhi EDGE
+fix walls all wall/diffusive xlo 0.0 ylo 10.0 units box
+fix top all wall/diffusive zhi v_pressdown :pre
 
 [Description:]
 

@@ -37,7 +37,7 @@ enum{NONE=0,EDGE,CONSTANT,VARIABLE};
 FixWallDiffusive::FixWallDiffusive(LAMMPS *lmp, int narg, char **arg) :
   Fix(lmp, narg, arg),
   nwall(0),
-  wall_temp(-1), TMAC(1.0), prng(NULL)
+  wall_temp(-1), TMAC(0.0), prng(NULL)
 {
   if (narg < 4) error->all(FLERR,"Illegal fix wall/diffusive command");
 
@@ -130,7 +130,7 @@ FixWallDiffusive::FixWallDiffusive(LAMMPS *lmp, int narg, char **arg) :
 	       "Must specify temperature > 0 K for fix wall/diffusive");
   }
 
-  if (TMAC < 0.0 || TMAC > 1.0) {
+  if (TMAC <= 0.0 || TMAC > 1.0) {
     error->all(FLERR,
 	       "Tangential momentum accommodation coefficient must be in [0.0, 1.0] for fix wall/diffusive");
   }
