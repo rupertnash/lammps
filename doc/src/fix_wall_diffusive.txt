@@ -1,0 +1,74 @@
+"LAMMPS WWW Site"_lws - "LAMMPS Documentation"_ld - "LAMMPS Commands"_lc :c
+
+:link(lws,http://lammps.sandia.gov)
+:link(ld,Manual.html)
+:link(lc,Commands_all.html)
+
+:line
+
+fix wall/diffusive command :h3
+
+[Syntax:]
+
+fix ID group-ID wall/diffusive face arg ... keyword value ... :pre
+
+ID, group-ID are documented in "fix"_fix.html command :ulb,l
+wall/diffusive = style name of this fix command :l
+one or more face/arg pairs may be appended, exactly as for the "fix
+wall/reflect"_fix_wall_reflect.html command :l
+zero or more keyword/value pairs may be appended :l
+keyword = {walltemp} :l
+  {walltemp} value = number like 273.15 (temperature units)
+  {TMAC} value = number (Tangential momentum accommodation coefficient, dimensionless probability)
+  {seed} value = integer >= 1 to seed pseudorandom number generation
+keyword = {units} :l
+  {units} value = {lattice} or {box}
+    {lattice} = the wall position is defined in lattice units
+    {box} = the wall position is defined in simulation box units :pre
+:ule
+
+[Examples:]
+
+fix xwalls all wall/reflect xlo EDGE xhi EDGE
+fix walls all wall/reflect xlo 0.0 ylo 10.0 units box
+fix top all wall/reflect zhi v_pressdown :pre
+
+[Description:]
+
+Bound the simulation with one or more walls which diffusively reflect
+particles in the specified group when they attempt to move thru them. This is based upon "fix wall/reflect"_fix_wall_reflect.html .
+
+Atoms reflect diffusively (based on the wall_temp supplied) with
+probability TMAC and specularly with probability 1-TMAC. All the
+provisos of "fix wall/reflect"_fix_wall_reflect.html apply here. You
+must specify a seed for the random number generation.
+
+:line
+
+[Restart, fix_modify, output, run start/stop, minimize info:]
+
+No information about this fix is written to "binary restart
+files"_restart.html.  None of the "fix_modify"_fix_modify.html options
+are relevant to this fix.  No global or per-atom quantities are stored
+by this fix for access by various "output commands"_Howto_output.html.
+No parameter of this fix can be used with the {start/stop} keywords of
+the "run"_run.html command.  This fix is not invoked during "energy
+minimization"_minimize.html.
+
+[Restrictions:]
+
+Any dimension (xyz) that has a reflecting wall must be non-periodic.
+
+A reflecting wall should not be used with rigid bodies such as those
+defined by a "fix rigid" command.  This is because the wall/reflect
+displaces atoms directly rather than exerts a force on them.  For
+rigid bodies, use a soft wall instead, such as "fix
+wall/lj93"_fix_wall.html.  LAMMPS will flag the use of a rigid
+fix with fix wall/reflect with a warning, but will not generate an
+error.
+
+[Related commands:]
+"fix wall/reflect"_fix_wall_reflect.html
+
+[Default:] none
+
